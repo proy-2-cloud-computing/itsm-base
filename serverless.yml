@@ -1,0 +1,272 @@
+org: miguelvillenab
+service: itsm-base
+
+frameworkVersion: '4'
+
+provider:
+  name: aws
+  runtime: python3.12
+  region: ${opt:region, 'us-east-1'}
+  stage: ${opt:stage, 'dev'}
+  # AWS Academy: las Lambdas usan el rol existente del laboratorio.
+  # En una cuenta normal, elimina este bloque y Serverless crea el rol.
+  iam:
+    role: arn:aws:iam::${aws:accountId}:role/LabRole
+  stackTags:
+    Proyecto: ITSM-Grupo6
+    Componente: base
+
+# ---------------------------------------------------------------------------
+# itsm-base contiene una sola Lambda: el trigger PreSignUp de Cognito.
+# Ademas crea los recursos compartidos por los 5 microservicios:
+#   - Cognito: User Pool, App Client y grupos de rol
+#   - S3: bucket de adjuntos
+#   - SNS: un topic por dominio
+#
+# Los microservicios consumen los Outputs con:
+#   ${cf:itsm-base-<stage>.<NombreDelOutput>}
+# ---------------------------------------------------------------------------
+
+functions:
+  preSignUp:
+    handler: src/pre_signup.handler
+    description: Valida el codigo de invitacion y asigna el tenant en el registro
+    environment:
+      # Codigos de invitacion por tenant. Para produccion, usar SSM Parameter Store.
+      TENANT_CODES: '{"ALFA-2026":"empresa-alfa","BETA-2026":"empresa-beta","GAMMA-2026":"empresa-gamma"}'
+
+package:
+  patterns:
+    - '!tests/**'
+    - '!scripts/**'
+    - '!**/__pycache__/**'
+    - '!**/*.pyc'
+    - '!README.md'
+    - '!package.json'
+    - '!package-lock.json'
+    - '!requirements.txt'
+
+resources:
+  Resources:
+
+    # -----------------------------------------------------------------------
+    # Cognito
+    # -----------------------------------------------------------------------
+    UserPool:
+      Type: AWS::Cognito::UserPool
+      Properties:
+        UserPoolName: itsm-${self:provider.stage}
+        UsernameAttributes:
+          - email
+        AutoVerifiedAttributes:
+          - email
+        MfaConfiguration: OFF
+        LambdaConfig:
+          PreSignUp: !GetAtt PreSignUpLambdaFunction.Arn
+        AdminCreateUserConfig:
+          AllowAdminCreateUserOnly: false
+        AccountRecoverySetting:
+          RecoveryMechanisms:
+            - Name: verified_email
+              Priority: 1
+        Policies:
+          PasswordPolicy:
+            MinimumLength: 8
+            RequireUppercase: true
+            RequireLowercase: true
+            RequireNumbers: true
+            RequireSymbols: false
+            TemporaryPasswordValidityDays: 7
+        # Atributo personalizado que viaja en el ID token.
+        # En CloudFormation se declara SIN el prefijo "custom:".
+        Schema:
+          - Name: tenant_id
+            AttributeDataType: String
+            Mutable: true
+            Required: false
+            StringAttributeConstraints:
+              MinLength: '1'
+              MaxLength: '64'
+
+    UserPoolClient:
+      Type: AWS::Cognito::UserPoolClient
+      Properties:
+        UserPoolId: !Ref UserPool
+        ClientName: itsm-web-${self:provider.stage}
+        # false porque es una app web pública (Amplify); no puede guardar secretos.
+        GenerateSecret: false
+        ExplicitAuthFlows:
+          - ALLOW_USER_PASSWORD_AUTH
+          - ALLOW_USER_SRP_AUTH
+          - ALLOW_REFRESH_TOKEN_AUTH
+        PreventUserExistenceErrors: ENABLED
+        # El frontend usa el ID token: incluye custom:tenant_id.
+        ReadAttributes:
+          - email
+          - email_verified
+          - custom:tenant_id
+        # El usuario NO puede escribir custom:tenant_id (evita que se cambie
+        # el tenant desde el cliente). Solo email queda escribible.
+        WriteAttributes:
+          - email
+        TokenValidityUnits:
+          AccessToken: hours
+          IdToken: hours
+          RefreshToken: days
+        AccessTokenValidity: 1
+        IdTokenValidity: 1
+        RefreshTokenValidity: 30
+
+    # Permite que Cognito invoque el trigger PreSignUp al registrarse.
+    PreSignUpInvokePermission:
+      Type: AWS::Lambda::Permission
+      Properties:
+        Action: lambda:InvokeFunction
+        FunctionName: !Ref PreSignUpLambdaFunction
+        Principal: cognito-idp.amazonaws.com
+        SourceArn: !GetAtt UserPool.Arn
+
+    GrupoSolicitante:
+      Type: AWS::Cognito::UserPoolGroup
+      Properties:
+        UserPoolId: !Ref UserPool
+        GroupName: solicitante
+        Description: Crea solicitudes de servicio
+        Precedence: 40
+
+    GrupoAgente:
+      Type: AWS::Cognito::UserPoolGroup
+      Properties:
+        UserPoolId: !Ref UserPool
+        GroupName: agente
+        Description: Atiende y cambia el estado de solicitudes e incidentes
+        Precedence: 30
+
+    GrupoAprobador:
+      Type: AWS::Cognito::UserPoolGroup
+      Properties:
+        UserPoolId: !Ref UserPool
+        GroupName: aprobador
+        Description: Aprueba cambios y solicitudes que lo requieren
+        Precedence: 20
+
+    GrupoAdmin:
+      Type: AWS::Cognito::UserPoolGroup
+      Properties:
+        UserPoolId: !Ref UserPool
+        GroupName: admin
+        Description: Administra el tenant
+        Precedence: 10
+
+    # -----------------------------------------------------------------------
+    # SNS: un topic por dominio, creados aqui para evitar dependencias
+    # circulares entre microservicios.
+    # -----------------------------------------------------------------------
+    CambiosTopic:
+      Type: AWS::SNS::Topic
+      Properties:
+        TopicName: itsm-${self:provider.stage}-cambios-eventos
+
+    SolicitudesTopic:
+      Type: AWS::SNS::Topic
+      Properties:
+        TopicName: itsm-${self:provider.stage}-solicitudes-eventos
+
+    IncidentesTopic:
+      Type: AWS::SNS::Topic
+      Properties:
+        TopicName: itsm-${self:provider.stage}-incidentes-eventos
+
+    ProblemasTopic:
+      Type: AWS::SNS::Topic
+      Properties:
+        TopicName: itsm-${self:provider.stage}-problemas-eventos
+
+    # -----------------------------------------------------------------------
+    # S3: adjuntos y cargas masivas.
+    # Sin BucketName para que CloudFormation genere uno unico.
+    # -----------------------------------------------------------------------
+    AdjuntosBucket:
+      Type: AWS::S3::Bucket
+      # Conserva los archivos si se elimina el stack.
+      DeletionPolicy: Retain
+      UpdateReplacePolicy: Retain
+      Properties:
+        BucketEncryption:
+          ServerSideEncryptionConfiguration:
+            - ServerSideEncryptionByDefault:
+                SSEAlgorithm: AES256
+        PublicAccessBlockConfiguration:
+          BlockPublicAcls: true
+          BlockPublicPolicy: true
+          IgnorePublicAcls: true
+          RestrictPublicBuckets: true
+        VersioningConfiguration:
+          Status: Enabled
+        CorsConfiguration:
+          CorsRules:
+            - AllowedHeaders:
+                - '*'
+              AllowedMethods:
+                - GET
+                - PUT
+                - POST
+                - HEAD
+              # En produccion reemplazar '*' por el dominio de Amplify.
+              AllowedOrigins:
+                - '*'
+              ExposedHeaders:
+                - ETag
+              MaxAge: 3000
+
+  Outputs:
+
+    UserPoolArn:
+      Value: !GetAtt UserPool.Arn
+      Export:
+        Name: !Sub 'itsm-${self:provider.stage}-UserPoolArn'
+
+    UserPoolId:
+      Value: !Ref UserPool
+      Export:
+        Name: !Sub 'itsm-${self:provider.stage}-UserPoolId'
+
+    UserPoolClientId:
+      Value: !Ref UserPoolClient
+      Export:
+        Name: !Sub 'itsm-${self:provider.stage}-UserPoolClientId'
+
+    CambiosTopicArn:
+      Value: !Ref CambiosTopic
+      Export:
+        Name: !Sub 'itsm-${self:provider.stage}-CambiosTopicArn'
+
+    SolicitudesTopicArn:
+      Value: !Ref SolicitudesTopic
+      Export:
+        Name: !Sub 'itsm-${self:provider.stage}-SolicitudesTopicArn'
+
+    IncidentesTopicArn:
+      Value: !Ref IncidentesTopic
+      Export:
+        Name: !Sub 'itsm-${self:provider.stage}-IncidentesTopicArn'
+
+    ProblemasTopicArn:
+      Value: !Ref ProblemasTopic
+      Export:
+        Name: !Sub 'itsm-${self:provider.stage}-ProblemasTopicArn'
+
+    AdjuntosBucketName:
+      Value: !Ref AdjuntosBucket
+      Export:
+        Name: !Sub 'itsm-${self:provider.stage}-AdjuntosBucketName'
+
+    AdjuntosBucketArn:
+      Value: !GetAtt AdjuntosBucket.Arn
+      Export:
+        Name: !Sub 'itsm-${self:provider.stage}-AdjuntosBucketArn'
+
+    Region:
+      Value: !Ref AWS::Region
+      Export:
+        Name: !Sub 'itsm-${self:provider.stage}-Region'

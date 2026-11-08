@@ -1,0 +1,20 @@
+{
+  "name": "itsm-base",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Infraestructura base de la plataforma ITSM: Cognito, S3 y SNS",
+  "scripts": {
+    "deploy": "serverless deploy",
+    "deploy:dev": "serverless deploy --stage dev",
+    "remove": "serverless remove",
+    "info": "serverless info --verbose",
+    "print": "serverless print",
+    "usuarios": "python3 scripts/crear_usuarios.py",
+    "token": "python3 scripts/obtener_token.py",
+    "registro": "python3 scripts/probar_registro.py",
+    "test": "python3 -m unittest discover -s tests -v"
+  },
+  "devDependencies": {
+    "serverless": "^4.0.0"
+  }
+}
