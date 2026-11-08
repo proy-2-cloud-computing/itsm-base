@@ -1,1 +1,1 @@
-"""Codigo del trigger PreSignUp de Cognito."""
+"""Codigo de la Lambda de registro publico."""

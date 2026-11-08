@@ -2,7 +2,8 @@
 
 Infraestructura compartida de la plataforma ITSM (Grupo 6). **No es un
 microservicio de negocio**: crea los recursos que usan los 5 microservicios y
-una única Lambda, el trigger `PreSignUp` que asigna el tenant en el registro.
+una única Lambda, `registrar`, que expone `POST /registro` para crear usuarios
+con código de invitación y asignarles su tenant.
 
 ## Qué crea
 
@@ -10,7 +11,7 @@ una única Lambda, el trigger `PreSignUp` que asigna el tenant en el registro.
 |---|---|---|
 | Cognito User Pool | `UserPool` | Login, `custom:tenant_id`, grupos de rol |
 | Cognito App Client | `UserPoolClient` | Cliente público para Amplify/Postman |
-| Lambda `preSignUp` | `PreSignUpLambdaFunction` | Valida el código de invitación y asigna `custom:tenant_id` |
+| Lambda `registrar` + `POST /registro` | `RegistrarLambdaFunction` | Valida el código de invitación, crea el usuario y asigna `custom:tenant_id` |
 | Grupos Cognito | `GrupoSolicitante`, `GrupoAgente`, `GrupoAprobador`, `GrupoAdmin` | Autorización por rol |
 | Topic SNS | `CambiosTopic` | Eventos de `itsm-cambios` |
 | Topic SNS | `SolicitudesTopic` | Eventos de `itsm-solicitudes` |
@@ -63,6 +64,7 @@ npx serverless info --verbose
 | `ProblemasTopicArn` | `arn:aws:sns:...` | `itsm-problemas` |
 | `AdjuntosBucketName` | `itsm-base-dev-adjuntosbucket-...` | Todos los que firman URLs |
 | `AdjuntosBucketArn` | `arn:aws:s3:::...` | Políticas IAM |
+| `RegistroApiUrl` | `https://xxx.execute-api.us-east-1.amazonaws.com/dev/registro` | Frontend y scripts de prueba |
 | `Region` | `us-east-1` | Scripts |
 
 En otro `serverless.yml`:
@@ -141,8 +143,14 @@ curl -H "Authorization: $ID_TOKEN" https://<api>/solicitudes
 
 ## Registro público con código de invitación
 
-El registro está habilitado (`AllowAdminCreateUserOnly: false`), pero pasa por
-el trigger `PreSignUp`: **sin un código válido, Cognito rechaza el registro**.
+El registro se hace con `POST /registro`, no con el auto-registro de Cognito.
+El User Pool tiene `AllowAdminCreateUserOnly: true`: la Lambda `registrar` crea
+el usuario con `AdminCreateUser` y asigna `custom:tenant_id` en el servidor.
+
+> **Por qué no se usa el trigger `PreSignUp`**: Cognito solo acepta
+> `autoConfirmUser`, `autoVerifyEmail` y `autoVerifyPhone` en su respuesta. Si
+> se devuelven `userAttributes`, el registro falla con
+> `InvalidLambdaResponseException: Unrecognizable lambda output`.
 
 | Tenant | Código de demo |
 |---|---|
@@ -152,13 +160,48 @@ el trigger `PreSignUp`: **sin un código válido, Cognito rechaza el registro**.
 
 Flujo:
 
-1. El frontend envía email, contraseña y `tenant_code`.
-2. Cognito invoca `PreSignUp` antes de crear el usuario.
-3. La Lambda valida el código y asigna `custom:tenant_id` en el servidor.
-4. Cognito crea el usuario confirmado (solo para la demo).
-5. El usuario inicia sesión normal y su ID token trae el tenant correcto.
+1. El frontend envía email, contraseña y `codigo` a `POST /registro`.
+2. La Lambda traduce el código a `tenant_id` y valida la solicitud.
+3. `AdminCreateUser` crea el usuario con `custom:tenant_id` y `email_verified`.
+4. `AdminSetUserPassword` fija la contraseña definitiva.
+5. `AdminAddUserToGroup` lo agrega al grupo `solicitante`.
+6. El usuario inicia sesión normal y su ID token trae el tenant correcto.
 
 El frontend nunca envía `tenant_id`: envía un código que el servidor traduce.
+
+### Contrato del endpoint
+
+```http
+POST /registro
+Content-Type: application/json
+```
+
+```json
+{
+  "email": "nuevo.alfa@example.com",
+  "password": "Itsm2026!",
+  "codigo": "ALFA-2026"
+}
+```
+
+Respuesta `201`:
+
+```json
+{
+  "mensaje": "Usuario registrado",
+  "email": "nuevo.alfa@example.com",
+  "tenant_id": "empresa-alfa",
+  "grupo": "solicitante",
+  "username": "nuevo.alfa@example.com"
+}
+```
+
+| Estado | Cuándo |
+|---|---|
+| `201` | Usuario creado |
+| `400` | Campos faltantes, JSON inválido, contraseña débil o código inválido |
+| `409` | El email ya está registrado |
+| `502` | Error inesperado de Cognito (se revierte el alta) |
 
 ### Probar sin frontend
 
@@ -178,24 +221,27 @@ python3 scripts/obtener_token.py \
   --claims
 ```
 
-Prueba también un código inválido: debe fallar y no crear el usuario.
+Prueba también un código inválido: debe devolver `400` y no crear el usuario.
 
-### Frontend con Amplify v6
+### Frontend
 
 ```js
-import { signUp } from 'aws-amplify/auth';
-
-await signUp({
-  username: email,
-  password,
-  options: {
-    userAttributes: { email },
-    clientMetadata: { tenant_code: codigo },
-  },
+const respuesta = await fetch(`${REGISTRO_API_URL}`, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ email, password, codigo }),
 });
+
+const datos = await respuesta.json();
+if (!respuesta.ok) {
+  throw new Error(datos.error);
+}
 ```
 
-### Pruebas unitarias del trigger
+Después del registro, inicia sesión con Amplify (`signIn`) como cualquier otro
+usuario. La pantalla solo necesita: email, contraseña y "código de empresa".
+
+### Pruebas unitarias
 
 ```bash
 python3 -m unittest discover -s tests -v
@@ -211,26 +257,26 @@ python3 scripts/diagnosticar_registro.py --stage dev --region us-east-1
 
 Debe mostrar:
 
-- `AllowAdminCreateUserOnly: False`
-- `LambdaConfig` con `PreSignUp`
-- `TENANT_CODES` en la Lambda
-- `Permiso de Cognito: SI`
+- `AllowAdminCreateUserOnly: True`
+- `LambdaConfig: {}` (sin `PreSignUp`)
+- `RegistroApiUrl`
+- `USER_POOL_ID` y `TENANT_CODES` en la Lambda `registrar`
 
 Errores comunes:
 
 | Código / mensaje | Causa | Solución |
 |---|---|---|
-| `NotAuthorizedException: SignUp is not permitted for this user pool` | No se desplegó el cambio de `AllowAdminCreateUserOnly` | `npx serverless deploy --stage dev` |
-| `UsernameExistsException` / "User already exists" | El email ya está registrado | Usa otro email |
-| `InvalidPasswordException` | No cumple la política | 8+, mayúscula, minúscula, número |
-| `InvalidLambdaResponseException` / "PreSignUp failed with error..." | El trigger falló o no tiene permiso | Revisa el diagnóstico y los logs |
-| `CodeDeliveryFailureException` | Falló el envío de correo | Revisa el atributo `email` |
-| `TooManyRequestsException` | Demasiados intentos | Espera y reintenta |
+| `HTTP 403 Missing Authentication Token` | La ruta o el método no existen | Despliega y revisa `RegistroApiUrl` |
+| `HTTP 400 Codigo de invitacion invalido` | El código no coincide | Usa `ALFA-2026`, `BETA-2026` o `GAMMA-2026` |
+| `HTTP 409 El email ya esta registrado` | El email ya existe | Usa otro email |
+| `HTTP 400 La contrasena no cumple la politica` | Contraseña débil | 8+, mayúscula, minúscula, número |
+| `HTTP 502 No se pudo completar el registro` | Falla de Cognito o del rol IAM | Revisa los logs de la Lambda |
+| `AccessDeniedException` en logs | `LabRole` no permite acciones de Cognito | Habilita los permisos en el laboratorio |
 
-Para ver los logs del trigger:
+Para ver los logs:
 
 ```bash
-npx serverless logs -f preSignUp --stage dev --tail
+npx serverless logs -f registrar --stage dev --tail
 ```
 
 ## Qué NO incluye (a propósito)
@@ -240,7 +286,7 @@ npx serverless logs -f preSignUp --stage dev --tail
   `AWS::Cognito::UserPoolDomain`.
 - **Suscripciones SNS**: cada consumidor crea su cola y su suscripción en su
   propio `serverless.yml` (así lo pide la guía).
-- **Microservicios de negocio**: la única Lambda es el trigger `PreSignUp`.
+- **Microservicios de negocio**: la única Lambda es `registrar`.
 
 ## Notas importantes
 
@@ -250,13 +296,17 @@ npx serverless logs -f preSignUp --stage dev --tail
   Amplify antes de la entrega final.
 - **`tenant_id`**: el App Client solo permite leer `custom:tenant_id`; no
   permite escribirlo, para que el usuario no pueda cambiar de tenant.
-- **Registro público**: un código inválido rechaza el registro. Los usuarios
-  creados por `crear_usuarios.py` siguen funcionando porque el handler permite
-  el trigger `PreSignUp_AdminCreateUser`.
+- **Registro público**: solo `POST /registro` puede crear usuarios; el
+  auto-registro de Cognito está deshabilitado. Los usuarios de
+  `crear_usuarios.py` se crean igual con `AdminCreateUser`.
 - **Códigos de invitación**: en la demo están en la variable `TENANT_CODES` del
   `serverless.yml`. En producción usa SSM Parameter Store y rótalos.
-- **Auto-confirmación**: `autoConfirmUser` y `autoVerifyEmail` son solo para la
-  demo. En producción quita `autoVerifyEmail` y exige confirmación por correo.
+- **Confirmación de email**: la Lambda marca `email_verified=true` y usa
+  `MessageAction=SUPPRESS` para no depender de SES. En producción envía la
+  invitación y exige verificación.
+- **Rol IAM**: `LabRole` debe permitir `cognito-idp:AdminCreateUser`,
+  `AdminSetUserPassword`, `AdminAddUserToGroup` y `AdminDeleteUser`. Si tu
+  laboratorio no lo permite, agrega esas acciones a la política del rol.
 - **AWS Academy / Learner Lab**: `provider.iam.role` apunta a
   `arn:aws:iam::${aws:accountId}:role/LabRole`. En una cuenta normal elimina ese
   bloque para que Serverless cree el rol. Verifica también que Cognito esté

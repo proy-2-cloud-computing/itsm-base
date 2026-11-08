@@ -2,7 +2,7 @@
   "name": "itsm-base",
   "version": "1.0.0",
   "private": true,
-  "description": "Infraestructura base de la plataforma ITSM: Cognito, S3 y SNS",
+  "description": "Infraestructura base de la plataforma ITSM: Cognito, S3, SNS y registro",
   "scripts": {
     "deploy": "serverless deploy",
     "deploy:dev": "serverless deploy --stage dev",

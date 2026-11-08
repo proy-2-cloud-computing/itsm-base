@@ -17,7 +17,11 @@ provider:
     Componente: base
 
 # ---------------------------------------------------------------------------
-# itsm-base contiene una sola Lambda: el trigger PreSignUp de Cognito.
+# itsm-base contiene una sola Lambda: el registro publico (POST /registro).
+# Crea usuarios con AdminCreateUser y asigna el tenant desde un codigo de
+# invitacion. No se usa el trigger PreSignUp porque Cognito no permite
+# asignar atributos personalizados desde ese trigger.
+#
 # Ademas crea los recursos compartidos por los 5 microservicios:
 #   - Cognito: User Pool, App Client y grupos de rol
 #   - S3: bucket de adjuntos
@@ -28,12 +32,19 @@ provider:
 # ---------------------------------------------------------------------------
 
 functions:
-  preSignUp:
-    handler: src/pre_signup.handler
-    description: Valida el codigo de invitacion y asigna el tenant en el registro
+  registrar:
+    handler: src/registrar.handler
+    description: Crea usuarios con codigo de invitacion y asigna el tenant
     environment:
+      USER_POOL_ID: !Ref UserPool
+      DEFAULT_GROUP: solicitante
       # Codigos de invitacion por tenant. Para produccion, usar SSM Parameter Store.
       TENANT_CODES: '{"ALFA-2026":"empresa-alfa","BETA-2026":"empresa-beta","GAMMA-2026":"empresa-gamma"}'
+    events:
+      - http:
+          path: registro
+          method: post
+          cors: true
 
 package:
   patterns:
@@ -61,10 +72,11 @@ resources:
         AutoVerifiedAttributes:
           - email
         MfaConfiguration: OFF
-        LambdaConfig:
-          PreSignUp: !GetAtt PreSignUpLambdaFunction.Arn
         AdminCreateUserConfig:
-          AllowAdminCreateUserOnly: false
+          # El registro publico pasa por POST /registro (Lambda registrar),
+          # que usa AdminCreateUser. Cognito no permite auto-registro directo
+          # con atributos personalizados.
+          AllowAdminCreateUserOnly: true
         AccountRecoverySetting:
           RecoveryMechanisms:
             - Name: verified_email
@@ -116,15 +128,6 @@ resources:
         AccessTokenValidity: 1
         IdTokenValidity: 1
         RefreshTokenValidity: 30
-
-    # Permite que Cognito invoque el trigger PreSignUp al registrarse.
-    PreSignUpInvokePermission:
-      Type: AWS::Lambda::Permission
-      Properties:
-        Action: lambda:InvokeFunction
-        FunctionName: !Ref PreSignUpLambdaFunction
-        Principal: cognito-idp.amazonaws.com
-        SourceArn: !GetAtt UserPool.Arn
 
     GrupoSolicitante:
       Type: AWS::Cognito::UserPoolGroup
@@ -270,3 +273,9 @@ resources:
       Value: !Ref AWS::Region
       Export:
         Name: !Sub 'itsm-${self:provider.stage}-Region'
+
+    RegistroApiUrl:
+      Description: URL publica del endpoint de registro
+      Value: !Sub 'https://${ApiGatewayRestApi}.execute-api.${AWS::Region}.amazonaws.com/${self:provider.stage}/registro'
+      Export:
+        Name: !Sub 'itsm-${self:provider.stage}-RegistroApiUrl'

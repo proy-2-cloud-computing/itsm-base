@@ -1,1 +1,1 @@
-"""Pruebas del trigger PreSignUp."""
+"""Pruebas del endpoint de registro."""

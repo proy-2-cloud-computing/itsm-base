@@ -5,11 +5,12 @@ Uso:
     python3 scripts/diagnosticar_registro.py --stage dev --region us-east-1
 
 Revisa:
-  - AllowAdminCreateUserOnly del User Pool
-  - LambdaConfig.PreSignUp
+  - AllowAdminCreateUserOnly del User Pool (debe ser True: el alta pasa por
+    la Lambda de registro, no por auto-registro de Cognito)
+  - ausencia del trigger PreSignUp (ya no se usa)
   - atributos del App Client
-  - estado y variable TENANT_CODES de la Lambda
-  - permiso de invocacion de Cognito sobre la Lambda
+  - estado y variables de la Lambda registrar
+  - que exista el Output RegistroApiUrl
 
 Sirve para explicar por que `probar_registro.py` rechaza un registro.
 """
@@ -71,16 +72,16 @@ def main():
     print(f"LambdaConfig:             {json.dumps(lambda_config, default=str)}")
     print(f"AutoVerifiedAttributes:   {pool.get('AutoVerifiedAttributes')}")
 
-    if admin_only is True:
+    if admin_only is not True:
         print(
-            "\nPROBLEMA: el registro publico esta deshabilitado. "
-            "Despliega los cambios con: npx serverless deploy --stage "
-            f"{args.stage}"
+            "\nPROBLEMA: se esperaba AllowAdminCreateUserOnly=True porque el "
+            "alta la hace la Lambda de registro. Despliega los cambios con: "
+            f"npx serverless deploy --stage {args.stage}"
         )
-    elif "PreSignUp" not in lambda_config:
+    if "PreSignUp" in lambda_config:
         print(
-            "\nPROBLEMA: el User Pool no tiene el trigger PreSignUp. "
-            "Despliega los cambios."
+            "\nPROBLEMA: el User Pool aun tiene el trigger PreSignUp. "
+            "Despliega los cambios para eliminarlo."
         )
 
     client = cognito.describe_user_pool_client(
@@ -92,11 +93,18 @@ def main():
     print(f"ReadAttributes:    {client.get('ReadAttributes')}")
     print(f"WriteAttributes:   {client.get('WriteAttributes')}")
 
-    print("\n=== Lambda PreSignUp ===")
+    print("\n=== Endpoint de registro ===")
+    url = outputs.get("RegistroApiUrl")
+    if url:
+        print(f"RegistroApiUrl: {url}")
+    else:
+        print("PROBLEMA: falta el Output RegistroApiUrl. Despliega los cambios.")
+
+    print("\n=== Lambda registrar ===")
     try:
         detalle = cfn.describe_stack_resource(
             StackName=stack_name,
-            LogicalResourceId="PreSignUpLambdaFunction",
+            LogicalResourceId="RegistrarLambdaFunction",
         )["StackResourceDetail"]
         funcion = detalle["PhysicalResourceId"]
         print(f"Funcion: {funcion}")
@@ -105,25 +113,21 @@ def main():
         variables = configuracion.get("Environment", {}).get("Variables", {})
         print(f"State:              {configuracion.get('State')}")
         print(f"LastUpdateStatus:   {configuracion.get('LastUpdateStatus')}")
+        print(f"USER_POOL_ID:       {variables.get('USER_POOL_ID')}")
+        print(f"DEFAULT_GROUP:      {variables.get('DEFAULT_GROUP')}")
         print(f"TENANT_CODES:       {variables.get('TENANT_CODES')}")
 
-        if "TENANT_CODES" not in variables:
-            print("\nPROBLEMA: la Lambda no tiene la variable TENANT_CODES.")
-
-        try:
-            politica = lam.get_policy(FunctionName=funcion)
-            print("Permiso de Cognito: SI")
-            print(politica.get("Policy", ""))
-        except ClientError as error:
-            if error.response["Error"]["Code"] == "ResourceNotFoundException":
-                print(
-                    "Permiso de Cognito: NO EXISTE "
-                    "(Cognito no puede invocar la Lambda)"
-                )
-            else:
-                raise
+        for requerida in ("USER_POOL_ID", "TENANT_CODES"):
+            if requerida not in variables:
+                print(f"\nPROBLEMA: la Lambda no tiene la variable {requerida}.")
     except ClientError as error:
-        print(f"No se pudo inspeccionar la Lambda: {error}", file=sys.stderr)
+        if error.response["Error"]["Code"] == "ResourceNotFoundException":
+            print(
+                "PROBLEMA: no existe la Lambda del registro. "
+                "Despliega los cambios."
+            )
+        else:
+            print(f"No se pudo inspeccionar la Lambda: {error}", file=sys.stderr)
 
 
 if __name__ == "__main__":
