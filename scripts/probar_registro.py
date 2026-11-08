@@ -69,8 +69,10 @@ def main():
             ClientMetadata={"tenant_code": args.codigo},
         )
     except ClientError as error:
-        mensaje = error.response.get("Error", {}).get("Message", str(error))
-        print(f"Registro rechazado: {mensaje}", file=sys.stderr)
+        detalle = error.response.get("Error", {})
+        codigo = detalle.get("Code", "Desconocido")
+        mensaje = detalle.get("Message", str(error))
+        print(f"Registro rechazado [{codigo}]: {mensaje}", file=sys.stderr)
         raise SystemExit(1) from error
 
     print("Registro exitoso")

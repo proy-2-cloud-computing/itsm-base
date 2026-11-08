@@ -12,6 +12,7 @@
     "usuarios": "python3 scripts/crear_usuarios.py",
     "token": "python3 scripts/obtener_token.py",
     "registro": "python3 scripts/probar_registro.py",
+    "diagnostico": "python3 scripts/diagnosticar_registro.py",
     "test": "python3 -m unittest discover -s tests -v"
   },
   "devDependencies": {

@@ -201,6 +201,38 @@ await signUp({
 python3 -m unittest discover -s tests -v
 ```
 
+### Si el registro es rechazado
+
+Primero ejecuta el diagnóstico:
+
+```bash
+python3 scripts/diagnosticar_registro.py --stage dev --region us-east-1
+```
+
+Debe mostrar:
+
+- `AllowAdminCreateUserOnly: False`
+- `LambdaConfig` con `PreSignUp`
+- `TENANT_CODES` en la Lambda
+- `Permiso de Cognito: SI`
+
+Errores comunes:
+
+| Código / mensaje | Causa | Solución |
+|---|---|---|
+| `NotAuthorizedException: SignUp is not permitted for this user pool` | No se desplegó el cambio de `AllowAdminCreateUserOnly` | `npx serverless deploy --stage dev` |
+| `UsernameExistsException` / "User already exists" | El email ya está registrado | Usa otro email |
+| `InvalidPasswordException` | No cumple la política | 8+, mayúscula, minúscula, número |
+| `InvalidLambdaResponseException` / "PreSignUp failed with error..." | El trigger falló o no tiene permiso | Revisa el diagnóstico y los logs |
+| `CodeDeliveryFailureException` | Falló el envío de correo | Revisa el atributo `email` |
+| `TooManyRequestsException` | Demasiados intentos | Espera y reintenta |
+
+Para ver los logs del trigger:
+
+```bash
+npx serverless logs -f preSignUp --stage dev --tail
+```
+
 ## Qué NO incluye (a propósito)
 
 - **Hosted UI de Cognito**: el frontend usa Amplify Auth con
